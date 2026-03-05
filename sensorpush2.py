@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 #
 # -----------------------------------------------------------------------------
+# DEPRECATED: Use sensorpushd.py instead
+# -----------------------------------------------------------------------------
 # sensorpush.py, Copyright Bjoern Olausson
 # -----------------------------------------------------------------------------
 # This program is free software; you can redistribute it and/or modify
