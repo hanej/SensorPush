@@ -169,6 +169,7 @@ def _load_legacy_influxdb2(config):
         'daemon': {
             'interval': 300,
             'poll_backlog': '10m',
+            'max_backfill': '0',
         },
     }
 
@@ -192,6 +193,7 @@ def _load_legacy_vm(config):
         'daemon': {
             'interval': 300,
             'poll_backlog': '10m',
+            'max_backfill': '0',
         },
     }
 
@@ -218,6 +220,7 @@ def _load_unified(config):
         'daemon': {
             'interval': config.getint('DAEMON', 'INTERVAL', fallback=300),
             'poll_backlog': config.get('DAEMON', 'POLL_BACKLOG', fallback='10m'),
+            'max_backfill': config.get('DAEMON', 'MAX_BACKFILL', fallback='0'),
         },
     }
 
@@ -773,8 +776,11 @@ class SensorPushAPI:
         self.login = login
         self.password = password
         self.verify_ssl = verify_ssl
+        if force_ipv4:
+            import urllib3.util.connection
+            urllib3.util.connection.HAS_IPV6 = False
         self.session = requests.Session()
-        self.session.mount(API_URL_BASE, HTTPAdapter(max_retries=10))
+        self.session.mount(API_URL_BASE, HTTPAdapter(max_retries=0))
         self.access_token = None
         self._token_time = None
         self._auth_header = None
@@ -790,13 +796,15 @@ class SensorPushAPI:
                         attempt, MAXRETRY)
             try:
                 r = self.session.post(API_URL_OA_AUTH, headers=HTTP_OA_HEAD,
-                                      data=http_data, verify=self.verify_ssl)
+                                      data=http_data, verify=self.verify_ssl,
+                                      timeout=30)
                 if r.status_code == 200:
                     auth = r.content.decode('utf-8')
                     break
                 else:
                     logger.error("Auth request failed with status %d", r.status_code)
-            except requests.exceptions.ConnectionError as e:
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
                 logger.warning("Connection error during auth: %s", e)
 
             if attempt >= MAXRETRY:
@@ -807,7 +815,8 @@ class SensorPushAPI:
         # Step 2: Get access token
         logger.info("Fetching API oauth access token")
         r = self.session.post(API_URL_OA_ATOK, headers=HTTP_OA_HEAD,
-                              data=auth, verify=self.verify_ssl)
+                              data=auth, verify=self.verify_ssl,
+                              timeout=30)
 
         if r.status_code == 200:
             self.access_token = json.loads(r.content.decode('utf-8'))['accesstoken']
@@ -832,7 +841,8 @@ class SensorPushAPI:
         self._ensure_auth()
         http_data = json.dumps(data or {})
         r = self.session.post(url, headers=self._auth_header,
-                              data=http_data, verify=self.verify_ssl)
+                              data=http_data, verify=self.verify_ssl,
+                              timeout=60)
         if r.status_code == 200:
             return json.loads(r.content.decode('utf-8'))
         raise ValueError(
@@ -1196,6 +1206,8 @@ class SensorPushDaemon:
         """
         poll_backlog_str = self.config['daemon']['poll_backlog']
         poll_backlog_min = parse_backlog(poll_backlog_str)
+        max_backfill_str = self.config['daemon']['max_backfill']
+        max_backfill_min = parse_backlog(max_backfill_str) if max_backfill_str != '0' else 0
 
         # Build sensor ID list (same IDs used as tags in records)
         sensor_ids = list(sensors.keys())
@@ -1256,6 +1268,18 @@ class SensorPushDaemon:
                         poll_backlog_str)
             starttime = currenttime - datetime.timedelta(
                 minutes=poll_backlog_min)
+
+        # Cap how far back we go if max_backfill is set
+        if max_backfill_min > 0:
+            earliest_allowed = currenttime - datetime.timedelta(
+                minutes=max_backfill_min)
+            if starttime < earliest_allowed:
+                logger.info(
+                    "Capping backfill start from %s to %s (max_backfill=%s)",
+                    starttime.strftime('%Y-%m-%dT%X%z'),
+                    earliest_allowed.strftime('%Y-%m-%dT%X%z'),
+                    max_backfill_str)
+                starttime = earliest_allowed
 
         return starttime, currenttime
 
